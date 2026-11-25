@@ -1,0 +1,178 @@
+# symfony-demo-morhent : environnement de développement local
+# Lancement : docker compose up -d --build
+# Tout passe par Caddy sur le port 80, avec des noms en *.localhost
+# identiques pour le navigateur et pour les conteneurs (évite le piège de l'issuer Keycloak).
+
+x-php-app: &php-app
+  build:
+    context: ./docker/php
+  restart: unless-stopped
+  environment: &php-env
+    APP_ENV: dev
+    TRUSTED_PROXIES: "private_ranges"
+    MAILER_DSN: smtp://mailpit:1025
+  depends_on: &php-depends
+    postgres:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+
+services:
+  # ---------------------------------------------------------------
+  # Reverse proxy local : un nom par application
+  # ---------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      default:
+        # Les conteneurs résolvent ces noms vers Caddy, comme le navigateur
+        aliases:
+          - morhent.localhost
+          - flottesimu.localhost
+          - navettesimu.localhost
+          - auth.localhost
+
+  # ---------------------------------------------------------------
+  # Morhent : site de réservation, back-office, orchestrateur de saga
+  # ---------------------------------------------------------------
+  morhent:
+    <<: *php-app
+    volumes:
+      - ./morhent:/app
+    environment:
+      <<: *php-env
+      DATABASE_URL: postgresql://app:app@postgres:5432/morhent?serverVersion=16&charset=utf8
+      # Messages de la saga (une étape = un message)
+      MESSENGER_TRANSPORT_DSN: amqp://demo:demo@rabbitmq:5672/%2f/saga
+      # Événements publiés par FlotteSimu, consommés pour le tableau de bord
+      FLOTTESIMU_EVENTS_DSN: amqp://demo:demo@rabbitmq:5672/%2f/flottesimu_events
+      FLOTTESIMU_BASE_URI: http://flottesimu.localhost
+      NAVETTESIMU_BASE_URI: http://navettesimu.localhost
+      FLOTTESIMU_DEMO_TOKEN: ${FLOTTESIMU_DEMO_TOKEN:-change-me}
+      OIDC_ISSUER: http://auth.localhost/realms/morhent
+      OIDC_CLIENT_ID: morhent-backoffice
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-change-me}
+      STRIPE_PUBLIC_KEY: ${STRIPE_PUBLIC_KEY:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+    depends_on:
+      <<: *php-depends
+      keycloak:
+        condition: service_started
+
+  # Même image et même code que Morhent : exécute la saga et lit les événements
+  morhent-worker:
+    <<: *php-app
+    volumes:
+      - ./morhent:/app
+    command: >
+      php bin/console messenger:consume saga flottesimu_events
+      --time-limit=3600 --memory-limit=256M -vv
+    environment:
+      <<: *php-env
+      DATABASE_URL: postgresql://app:app@postgres:5432/morhent?serverVersion=16&charset=utf8
+      MESSENGER_TRANSPORT_DSN: amqp://demo:demo@rabbitmq:5672/%2f/saga
+      FLOTTESIMU_EVENTS_DSN: amqp://demo:demo@rabbitmq:5672/%2f/flottesimu_events
+      FLOTTESIMU_BASE_URI: http://flottesimu.localhost
+      NAVETTESIMU_BASE_URI: http://navettesimu.localhost
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+
+  # ---------------------------------------------------------------
+  # FlotteSimu : logiciel de gestion tiers simulé (source de vérité)
+  # ---------------------------------------------------------------
+  flottesimu:
+    <<: *php-app
+    volumes:
+      - ./flottesimu:/app
+    environment:
+      <<: *php-env
+      DATABASE_URL: postgresql://app:app@postgres:5432/flottesimu?serverVersion=16&charset=utf8
+      # Publie reservation.created, reservation.cancelled, vehicle.picked_up, vehicle.returned
+      FLOTTESIMU_EVENTS_DSN: amqp://demo:demo@rabbitmq:5672/%2f/flottesimu_events
+      # Protège la route d'administration du panneau de pannes
+      FLOTTESIMU_DEMO_TOKEN: ${FLOTTESIMU_DEMO_TOKEN:-change-me}
+
+  # ---------------------------------------------------------------
+  # NavetteSimu : partenaire navette simulé
+  # ---------------------------------------------------------------
+  navettesimu:
+    <<: *php-app
+    volumes:
+      - ./navettesimu:/app
+    environment:
+      <<: *php-env
+      DATABASE_URL: postgresql://app:app@postgres:5432/navettesimu?serverVersion=16&charset=utf8
+
+  # ---------------------------------------------------------------
+  # Briques partagées
+  # ---------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    volumes:
+      # Crée les bases morhent, flottesimu, navettesimu et keycloak au premier démarrage
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5438:5432" # accès depuis PhpStorm (Database)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: demo
+      RABBITMQ_DEFAULT_PASS: demo
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: app
+      KC_DB_PASSWORD: app
+      # Même URL publique pour le navigateur et pour Morhent
+      KC_HOSTNAME: http://auth.localhost
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+    volumes:
+      # Déposer ici realm-morhent.json (realm, client, groupes, utilisateurs de démo)
+      - ./docker/keycloak/import:/opt/keycloak/data/import:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mailpit:
+    image: axllent/mailpit
+    restart: unless-stopped
+
+  # S6 (optionnel) : Mercure pour Turbo Streams. FrankenPHP embarque un hub
+  # Mercure ; il suffira de l'activer dans le conteneur morhent.
+
+volumes:
+  pgdata:
+  rabbitmqdata:
