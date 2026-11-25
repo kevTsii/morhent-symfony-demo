@@ -1,0 +1,27 @@
+{
+	auto_https off
+}
+
+http://morhent.localhost {
+	reverse_proxy morhent:80
+}
+
+http://flottesimu.localhost {
+	reverse_proxy flottesimu:80
+}
+
+http://navettesimu.localhost {
+	reverse_proxy navettesimu:80
+}
+
+http://auth.localhost {
+	reverse_proxy keycloak:8080
+}
+
+http://mail.localhost {
+	reverse_proxy mailpit:8025
+}
+
+http://rabbitmq.localhost {
+	reverse_proxy rabbitmq:15672
+}

@@ -1,0 +1,4 @@
+CREATE DATABASE morhent;
+CREATE DATABASE flottesimu;
+CREATE DATABASE navettesimu;
+CREATE DATABASE keycloak;
