@@ -157,6 +157,7 @@ services:
       KC_DB_PASSWORD: app
       # Même URL publique pour le navigateur et pour Morhent
       KC_HOSTNAME: http://auth.localhost
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
     volumes:
@@ -169,6 +170,7 @@ services:
   mailpit:
     image: axllent/mailpit
     restart: unless-stopped
+
 
   # S6 (optionnel) : Mercure pour Turbo Streams. FrankenPHP embarque un hub
   # Mercure ; il suffira de l'activer dans le conteneur morhent.
